@@ -1,3 +1,6 @@
+setuptools>=68.0.0
+wheel
+arabic-reshaper==2.1.0
 python-telegram-bot>=21.0
 python-dotenv==1.0.0
 requests==2.31.0
@@ -5,3 +8,9 @@ maigret
 yt-dlp
 
 #source venv/bin/activate && TELEGRAM_BOT_TOKEN="8640746951:AAHQO0stCvKdRP2wr4WalT4N4SegRmwTO_0" python bot.py
+#source venv/bin/activate && \
+#TELEGRAM_BOT_TOKEN="8640746951:AAHQO0stCvKdRP2wr4WalT4N4SegRmwTO_0" \
+#ACRCLOUD_HOST="identify-xxx.acrcloud.com" \
+#ACRCLOUD_ACCESS_KEY="a18019d047c6910b77d458059fc67d59" \
+#ACRCLOUD_ACCESS_SECRET="MsVEtvMLBEx1nzDm4UqS4kb4lThgAj22NKfJYsMk" \
+#python bot.py 
