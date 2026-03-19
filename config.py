@@ -4,12 +4,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
-    TELEGRAM_BOT_TOKEN = os.getenv('640746951:AAHQO0stCvKdRP2wr4WalT4N4SegRmwTO_0')
+    TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     BOT_NAME = "Xentera"
 
-    ACRCLOUD_HOST = os.getenv('identify-xxx.acrcloud.com')
-    ACRCLOUD_ACCESS_KEY = os.getenv('a18019d047c6910b77d458059fc67d59')
-    ACRCLOUD_ACCESS_SECRET = os.getenv('MsVEtvMLBEx1nzDm4UqS4kb4lThgAj22NKfJYsMk')
+    ACRCLOUD_HOST = os.getenv('ACRCLOUD_HOST')
+    ACRCLOUD_ACCESS_KEY = os.getenv('ACRCLOUD_ACCESS_KEY')
+    ACRCLOUD_ACCESS_SECRET = os.getenv('ACRCLOUD_ACCESS_SECRET')
     
     @classmethod
     def validate(cls):

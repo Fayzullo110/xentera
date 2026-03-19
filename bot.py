@@ -266,8 +266,8 @@ async def handle_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE
         await search_songs(update.message, query, update.message.from_user.id)
 
 async def search_songs(message, query: str, user_id: int):
-    """Search for songs and show results with inline buttons"""
-    searching_msg = await message.reply_text(t(user_id, "searching", query=query))
+    """Search for songs on YouTube and show results"""
+    status_msg = await message.reply_text(f"🔍 Searching for: {query}...")
     
     try:
         import subprocess
@@ -283,7 +283,13 @@ async def search_songs(message, query: str, user_id: int):
             f'ytsearch20:{query} audio'  # Get more results for pagination
         ]
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
         
         if result.returncode == 0:
             # Parse the JSON output (it might be multiple JSON objects or a single line)
@@ -334,41 +340,8 @@ async def search_songs(message, query: str, user_id: int):
         await message.reply_text(f"❌ Error: {str(e)}")
 
 
-def extract_urls(text: str) -> list[str]:
-    return re.findall(r"https?://[^\s]+", text)
-
-
-def is_youtube_url(url: str) -> bool:
-    try:
-        host = (urlparse(url).hostname or "").lower()
-        return "youtube.com" in host or "youtu.be" in host
-    except Exception:
-        return False
-
-
-def is_instagram_url(url: str) -> bool:
-    try:
-        host = (urlparse(url).hostname or "").lower()
-        return "instagram.com" in host
-    except Exception:
-        return False
-
-
-def extract_youtube_id(url: str) -> str | None:
-    try:
-        parsed = urlparse(url)
-        host = (parsed.hostname or "").lower()
-        if "youtu.be" in host:
-            vid = parsed.path.lstrip("/")
-            return vid or None
-        qs = parse_qs(parsed.query)
-        return (qs.get("v") or [None])[0]
-    except Exception:
-        return None
-
-
-async def handle_video_link(message, url: str, user_id: int) -> None:
-    status_msg = await message.reply_text("🔗 Processing link...")
+async def handle_video_link(message, url: str, user_id: int):
+    status_msg = await message.reply_text("🔗 Detected a video link. Processing...")
     try:
         # YouTube: download directly
         if is_youtube_url(url):
@@ -389,7 +362,13 @@ async def handle_video_link(message, url: str, user_id: int) -> None:
                     '--no-playlist',
                     url,
                 ]
-                meta_res = subprocess.run(meta_cmd, capture_output=True, text=True, timeout=30)
+                meta_res = await asyncio.to_thread(
+                    subprocess.run,
+                    meta_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
                 meta = json.loads(meta_res.stdout) if meta_res.returncode == 0 and meta_res.stdout.strip() else {}
                 ig_title = (meta.get('title') or "Instagram").strip() or "Instagram"
                 ig_id = (meta.get('id') or "ig").strip() or "ig"
@@ -411,11 +390,20 @@ async def handle_video_link(message, url: str, user_id: int) -> None:
                     cmd = [
                         'yt-dlp',
                         '--no-playlist',
+                        '--retries', '3',
+                        '--fragment-retries', '3',
+                        '--socket-timeout', '15',
                         '-f', 'bestaudio',
                         '-o', output_template,
                         url,
                     ]
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                    result = await asyncio.to_thread(
+                        subprocess.run,
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=600,
+                    )
 
                     matches = glob.glob(f"{tmp_dir}/{base_name}.*") if result.returncode == 0 else []
                     clip_file = matches[0] if matches else None
@@ -430,18 +418,18 @@ async def handle_video_link(message, url: str, user_id: int) -> None:
                             await message.reply_text(f"🎧 Identified: {query}")
 
                             # Use YouTube Music search for the full track
-                            ytm = subprocess.run(
+                            ytm = await asyncio.to_thread(
+                                subprocess.run,
                                 [
                                     'yt-dlp',
                                     '--flat-playlist',
                                     '--dump-json',
-                                    '--no-download',
-                                    '--match-filter', 'duration < 900 & duration > 90',
-                                    f'ytmsearch1:{query}',
+                                    '--no-playlist',
+                                    f'ytsearch1:{query} audio'
                                 ],
                                 capture_output=True,
                                 text=True,
-                                timeout=30,
+                                timeout=60,
                             )
                             if ytm.returncode == 0 and ytm.stdout.strip():
                                 v = json.loads(ytm.stdout.strip().split('\n')[0])
@@ -477,11 +465,20 @@ async def handle_video_link(message, url: str, user_id: int) -> None:
                 cmd = [
                     'yt-dlp',
                     '--no-playlist',
+                    '--retries', '3',
+                    '--fragment-retries', '3',
+                    '--socket-timeout', '15',
                     '-f', 'bestaudio',
                     '-o', output_template,
                     url,
                 ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
 
                 matches = glob.glob(f"{tmp_dir}/{base_name}.*") if result.returncode == 0 else []
                 downloaded_file = matches[0] if matches else None
@@ -509,7 +506,13 @@ async def handle_video_link(message, url: str, user_id: int) -> None:
                 '--no-playlist',
                 url,
             ]
-            meta_res = subprocess.run(meta_cmd, capture_output=True, text=True, timeout=30)
+            meta_res = await asyncio.to_thread(
+                subprocess.run,
+                meta_cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
             if meta_res.returncode != 0:
                 await message.reply_text("❌ Could not read Instagram link (may require login/cookies). Try sending a YouTube link instead.")
                 asyncio.create_task(delete_later(status_msg, 4))
@@ -820,12 +823,21 @@ async def process_download(message, video_url: str, title: str, user_id: int, vi
         cmd = [
             'yt-dlp',
             '--no-playlist',
+            '--retries', '3',
+            '--fragment-retries', '3',
+            '--socket-timeout', '15',
             '-f', 'bestaudio',
             '-o', output_template,
             video_url
         ]
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # 5 minute timeout
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
         
         if result.returncode == 0:
             matches = glob.glob(f"{tmp_dir}/{base_name}.*")
@@ -1064,7 +1076,15 @@ def main() -> None:
     Config.validate()
     
     # Create the Application
-    application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+    # Replit can be slow to upload larger audio files; increase request timeouts.
+    from telegram.request import HTTPXRequest
+    request = HTTPXRequest(
+        connect_timeout=30,
+        read_timeout=300,
+        write_timeout=300,
+        pool_timeout=30,
+    )
+    application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).request(request).build()
 
     # Add command handlers
     application.add_handler(CommandHandler("start", start_command))
