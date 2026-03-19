@@ -301,7 +301,7 @@ async def handle_music_search(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def search_songs(message, query: str, user_id: int):
     """Search for songs on YouTube and show results"""
-    status_msg = await message.reply_text(f"🔍 Searching for: {query}...")
+    searching_msg = await message.reply_text(f"🔍 Searching for: {query}...")
     
     try:
         import subprocess
