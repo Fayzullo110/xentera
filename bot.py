@@ -312,6 +312,7 @@ async def search_songs(message, query: str, user_id: int):
             '--flat-playlist',
             '--match-filter', 'duration < 600',
             '--reject-title', '(?i)(live|interview|reaction|podcast|mix|remix|cover|sped up|slowed|full album|concert)',
+            '--js-runtimes', 'node',
             '--dump-json', 
             '--no-download',
             f'ytsearch20:{query} audio'  # Get more results for pagination
@@ -364,8 +365,10 @@ async def search_songs(message, query: str, user_id: int):
                 asyncio.create_task(delete_later(searching_msg, 6))
             else:
                 await message.reply_text(f"❌ No songs found for: {query}")
+                asyncio.create_task(delete_later(searching_msg, 6))
         else:
             await message.reply_text(f"❌ Error searching for: {query}")
+            asyncio.create_task(delete_later(searching_msg, 6))
             
     except subprocess.TimeoutExpired:
         await message.reply_text("⏰ Search timed out. Please try again.")
@@ -427,6 +430,7 @@ async def handle_video_link(message, url: str, user_id: int):
                         '--retries', '3',
                         '--fragment-retries', '3',
                         '--socket-timeout', '15',
+                        '--js-runtimes', 'node',
                         '-f', 'bestaudio',
                         '-o', output_template,
                         url,
@@ -459,6 +463,7 @@ async def handle_video_link(message, url: str, user_id: int):
                                     '--flat-playlist',
                                     '--dump-json',
                                     '--no-playlist',
+                                    '--js-runtimes', 'node',
                                     f'ytsearch1:{query} audio'
                                 ],
                                 capture_output=True,
@@ -502,6 +507,7 @@ async def handle_video_link(message, url: str, user_id: int):
                     '--retries', '3',
                     '--fragment-retries', '3',
                     '--socket-timeout', '15',
+                    '--js-runtimes', 'node',
                     '-f', 'bestaudio',
                     '-o', output_template,
                     url,
@@ -860,6 +866,7 @@ async def process_download(message, video_url: str, title: str, user_id: int, vi
             '--retries', '3',
             '--fragment-retries', '3',
             '--socket-timeout', '15',
+            '--js-runtimes', 'node',
             '-f', 'bestaudio',
             '-o', output_template,
             video_url
