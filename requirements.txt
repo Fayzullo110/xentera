@@ -1,12 +1,10 @@
 setuptools>=68.0.0
 wheel
-arabic-reshaper==2.1.0
+arabic-reshaper>=3.0.0
 python-telegram-bot>=21.0
 python-dotenv==1.0.0
-requests==2.31.0
-maigret
+requests>=2.31.0
 yt-dlp
-
 #source venv/bin/activate && TELEGRAM_BOT_TOKEN="8640746951:AAHQO0stCvKdRP2wr4WalT4N4SegRmwTO_0" python bot.py
 #source venv/bin/activate && \
 #TELEGRAM_BOT_TOKEN="8640746951:AAHQO0stCvKdRP2wr4WalT4N4SegRmwTO_0" \
