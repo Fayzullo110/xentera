@@ -36,6 +36,7 @@ ENV/
 *.temp
 search_results_*.pkl
 user_languages.json
+temp_link_*.pkl
 
 # Logs
 *.log
