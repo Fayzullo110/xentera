@@ -22,6 +22,40 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Helper functions for URL detection and parsing
+import re
+from urllib.parse import urlparse, parse_qs
+
+def extract_urls(text):
+    """Extract URLs from text"""
+    url_pattern = re.compile(r'(https?://[^\s]+)')
+    return url_pattern.findall(text)
+
+def is_youtube_url(url):
+    """Check if URL is a YouTube URL"""
+    parsed = urlparse(url)
+    return parsed.netloc in ('www.youtube.com', 'youtube.com', 'youtu.be', 'm.youtube.com')
+
+def is_instagram_url(url):
+    """Check if URL is an Instagram URL"""
+    parsed = urlparse(url)
+    return parsed.netloc in ('www.instagram.com', 'instagram.com', 'www.instagr.am', 'instagr.am')
+
+def extract_youtube_id(url):
+    """Extract YouTube video ID from URL"""
+    parsed = urlparse(url)
+    if parsed.netloc in ('youtu.be', 'www.youtu.be'):
+        return parsed.path.lstrip('/')
+    if parsed.netloc in ('www.youtube.com', 'youtube.com', 'm.youtube.com'):
+        if parsed.path == '/watch':
+            qs = parse_qs(parsed.query)
+            return qs.get('v', [None])[0]
+        if parsed.path.startswith('/embed/'):
+            return parsed.path.split('/')[2]
+        if parsed.path.startswith('/v/'):
+            return parsed.path.split('/')[2]
+    return None
+
 USER_LANG_FILE = "user_langs.json"
 
 TRANSLATIONS = {
