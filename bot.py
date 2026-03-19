@@ -359,7 +359,7 @@ async def handle_video_search(update: Update, context: ContextTypes.DEFAULT_TYPE
     url = context.args[0]
     user_id = update.message.from_user.id
     if is_youtube_url(url) or is_instagram_url(url) or is_facebook_url(url) or is_x_url(url):
-        await handle_video_link(update.message, url, user_id, video_mode=True)
+        await handle_video_link_download(update.message, url, user_id, video_mode=True)
     else:
         await update.message.reply_text("❌ Unsupported video link. Please send a YouTube, Instagram, Facebook, or X (Twitter) link.")
 
@@ -442,7 +442,7 @@ async def search_songs(message, query: str, user_id: int):
         await message.reply_text(f"❌ Error: {str(e)}")
 
 
-async def handle_video_link(message, url: str, user_id: int, video_mode: bool = False):
+async def handle_video_link_download(message, url: str, user_id: int, video_mode: bool = False):
     status_msg = await message.reply_text("🔗 Detected a video link. Processing...")
     try:
         # YouTube: download directly
@@ -652,7 +652,6 @@ async def handle_video_link(message, url: str, user_id: int, video_mode: bool = 
                     '--dump-json',
                     '--no-download',
                     '--no-playlist',
-                    '--js-runtimes', 'node',
                     f'ytsearch1:{query} audio'
                 ],
                 capture_output=True,
@@ -678,7 +677,7 @@ async def handle_video_link(message, url: str, user_id: int, video_mode: bool = 
         await message.reply_text("❌ Error processing video link. Please try again.")
         asyncio.create_task(delete_later(status_msg, 4))
 
-async def handle_video_link(message, url: str, user_id: int, video_mode: bool = False):
+async def handle_video_link_menu(message, url: str, user_id: int, video_mode: bool = False):
     status_msg = await message.reply_text(t(user_id, "video_link_detected"))
     try:
         # Create inline keyboard with music and video options
@@ -721,7 +720,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if urls:
         url = urls[0]
         if is_youtube_url(url) or is_instagram_url(url) or is_facebook_url(url) or is_x_url(url):
-            await handle_video_link(update.message, url, user_id)
+            await handle_video_link_menu(update.message, url, user_id)
             return
     
     # Check if it's a song selection (single number)
@@ -884,12 +883,18 @@ async def process_video_download(message, video_url: str, title: str, user_id: i
             '--retries', '3',
             '--fragment-retries', '3',
             '--socket-timeout', '15',
-            '--js-runtimes', 'node',
             '-f', 'bv*[ext=mp4][vcodec^=avc1][width=1920][height=1080]+ba[ext=m4a]/bv*[ext=mp4][vcodec^=avc1][height=1080]+ba[ext=m4a]/bv*[ext=mp4][vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4][width=1920][height=1080]/b[ext=mp4][height<=1080]/best[ext=mp4]/best',
             '--merge-output-format', 'mp4',
             '-o', output_template,
             video_url
         ]
+
+        if is_instagram_url(video_url):
+            cmd = cmd[:-1] + [
+                '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                '--add-header', 'Referer:https://www.instagram.com/',
+                cmd[-1],
+            ]
         
         result = await asyncio.to_thread(
             subprocess.run,
@@ -959,7 +964,20 @@ async def process_video_download(message, video_url: str, title: str, user_id: i
             else:
                 await message.reply_text(t(user_id, "video_download_failed"))
         else:
-            await message.reply_text(t(user_id, "video_download_failed"))
+            stderr = (result.stderr or "").lower()
+            if is_instagram_url(video_url) and (
+                "login" in stderr
+                or "cookies" in stderr
+                or "session" in stderr
+                or "private" in stderr
+                or "challenge" in stderr
+            ):
+                await message.reply_text(
+                    "❌ Instagram requires login/cookies for this link. Without logging in, only some public posts can be downloaded.\n"
+                    "Try a different Instagram link (public), or send a YouTube link instead."
+                )
+            else:
+                await message.reply_text(t(user_id, "video_download_failed"))
             
     except subprocess.TimeoutExpired:
         await message.reply_text(t(user_id, "timeout"))
@@ -988,11 +1006,17 @@ async def process_download(message, video_url: str, title: str, user_id: int, vi
             '--retries', '3',
             '--fragment-retries', '3',
             '--socket-timeout', '15',
-            '--js-runtimes', 'node',
             '-f', 'bestaudio',
             '-o', output_template,
             video_url
         ]
+
+        if is_instagram_url(video_url):
+            cmd = cmd[:-1] + [
+                '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                '--add-header', 'Referer:https://www.instagram.com/',
+                cmd[-1],
+            ]
         
         result = await asyncio.to_thread(
             subprocess.run,
@@ -1030,7 +1054,21 @@ async def process_download(message, video_url: str, title: str, user_id: int, vi
             else:
                 await message.reply_text("✅ Download complete but file not found")
         else:
-            await message.reply_text(f"❌ Download failed: {result.stderr}")
+            stderr = (result.stderr or "")
+            low = stderr.lower()
+            if is_instagram_url(video_url) and (
+                "login" in low
+                or "cookies" in low
+                or "session" in low
+                or "private" in low
+                or "challenge" in low
+            ):
+                await message.reply_text(
+                    "❌ Instagram requires login/cookies for this link. Without logging in, only some public posts can be downloaded.\n"
+                    "Try a different Instagram link (public), or send a YouTube link instead."
+                )
+            else:
+                await message.reply_text(f"❌ Download failed: {stderr}")
             
     except subprocess.TimeoutExpired:
         await message.reply_text("⏰ Download timed out. Please try again.")
@@ -1211,7 +1249,7 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await process_download(query.message, url, "YouTube", user_id, vid)
             elif is_instagram_url(url):
                 # Use the existing Instagram audio flow
-                await handle_video_link(query.message, url, user_id, video_mode=False)
+                await handle_video_link_download(query.message, url, user_id, video_mode=False)
             elif is_facebook_url(url):
                 await process_download(query.message, url, "Facebook", user_id, extract_facebook_id(url))
             elif is_x_url(url):
@@ -1250,7 +1288,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if urls:
         url = urls[0]
         if is_youtube_url(url) or is_instagram_url(url) or is_facebook_url(url) or is_x_url(url):
-            await handle_video_link(update.message, url, user_id)
+            await handle_video_link_menu(update.message, url, user_id)
             return
     
     # Check if it's a song selection (single number)
