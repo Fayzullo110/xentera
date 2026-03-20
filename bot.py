@@ -101,6 +101,7 @@ TRANSLATIONS = {
         "video_link_detected": "🔗 Detected a video link. Choose format:",
         "video_button": "🎬 Video",
         "music_button": "🎵 Music",
+        "share_footer": "⬇️ Download music and video with @xcrumbbot",
         "timeout": "⏰ Search timed out. Please try again.",
     },
     "uz": {
@@ -120,6 +121,7 @@ TRANSLATIONS = {
         "video_link_detected": "🔗 Video havola aniqlandi. Formatni tanlang:",
         "video_button": "🎬 Video",
         "music_button": "🎵 Music",
+        "share_footer": "⬇️ Musiqa va videoni @xcrumbbot orqali yuklab oling",
         "timeout": "⏰ Qidirish vaqti tugadi. Iltimos, qayta urinib ko'ring.",
     },
     "ru": {
@@ -139,6 +141,7 @@ TRANSLATIONS = {
         "video_link_detected": "🔗 Обнаружена видеоссылка. Выберите формат:",
         "video_button": "🎬 Видео",
         "music_button": "🎵 Музыка",
+        "share_footer": "⬇️ Скачивай музыку и видео через @xcrumbbot",
         "timeout": "⏰ Поиск завершился по времени. Попробуйте еще раз.",
     },
 }
@@ -201,7 +204,7 @@ def acrcloud_is_configured() -> bool:
 def acrcloud_identify(file_path: str) -> dict | None:
     """Identify music using ACRCloud API.
 
-    Returns a dict with keys: title, artist, album (best-effort) or None.
+    Returns a dict with keys: title, artist, album, score (best-effort) or None.
     """
     if not acrcloud_is_configured():
         return None
@@ -274,10 +277,15 @@ def acrcloud_identify(file_path: str) -> dict | None:
     if artists and isinstance(artists, list) and isinstance(artists[0], dict):
         artist = (artists[0].get("name") or "").strip()
     album = ((best.get("album") or {}).get("name") or "").strip() if isinstance(best.get("album"), dict) else ""
+    score = None
+    try:
+        score = float(best.get("score")) if best.get("score") is not None else None
+    except Exception:
+        score = None
 
     if not title:
         return None
-    return {"title": title, "artist": artist, "album": album}
+    return {"title": title, "artist": artist, "album": album, "score": score}
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
@@ -465,7 +473,7 @@ async def handle_video_link_download(message, url: str, user_id: int, video_mode
                     return
                 except Exception:
                     pass
-            # Original audio flow for music mode
+
             try:
                 meta_cmd = [
                     'yt-dlp',
@@ -484,191 +492,11 @@ async def handle_video_link_download(message, url: str, user_id: int, video_mode
                 meta = json.loads(meta_res.stdout) if meta_res.returncode == 0 and meta_res.stdout.strip() else {}
                 ig_title = (meta.get('title') or "Instagram").strip() or "Instagram"
                 ig_id = (meta.get('id') or "ig").strip() or "ig"
-                ig_duration = meta.get('duration')
-                try:
-                    ig_duration = float(ig_duration) if ig_duration is not None else None
-                except Exception:
-                    ig_duration = None
-
-                # If the Reel is short, prefer full song identification via ACRCloud (if configured).
-                # If ACRCloud isn't configured, fall back to metadata-based matching below.
-                if ig_duration is not None and ig_duration < 90:
-                    safe_id = ig_id
-                    tmp_dir = os.getenv("TMPDIR") or "/tmp"
-                    base_name = f"{user_id}_{safe_id}_ig"
-                    output_template = f"{tmp_dir}/{base_name}.%(ext)s"
-                    os.makedirs(tmp_dir, exist_ok=True)
-
-                    cmd = [
-                        'yt-dlp',
-                        '--no-playlist',
-                        '--retries', '3',
-                        '--fragment-retries', '3',
-                        '--socket-timeout', '15',
-                        '--js-runtimes', 'node',
-                        '-f', 'bestaudio',
-                        '-o', output_template,
-                        url,
-                    ]
-                    result = await asyncio.to_thread(
-                        subprocess.run,
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=600,
-                    )
-
-                    matches = glob.glob(f"{tmp_dir}/{base_name}.*") if result.returncode == 0 else []
-                    clip_file = matches[0] if matches else None
-
-                    if clip_file and os.path.exists(clip_file) and acrcloud_is_configured():
-                        identified = acrcloud_identify(clip_file)
-                        if identified:
-                            q_artist = identified.get("artist") or ""
-                            q_title = identified.get("title") or ""
-                            query = f"{q_artist} - {q_title}".strip(" -")
-
-                            await message.reply_text(f"🎧 Identified: {query}")
-
-                            # Use YouTube Music search for the full track
-                            ytm = await asyncio.to_thread(
-                                subprocess.run,
-                                [
-                                    'yt-dlp',
-                                    '--flat-playlist',
-                                    '--dump-json',
-                                    '--no-playlist',
-                                    '--js-runtimes', 'node',
-                                    f'ytsearch1:{query} audio'
-                                ],
-                                capture_output=True,
-                                text=True,
-                                timeout=60,
-                            )
-                            if ytm.returncode == 0 and ytm.stdout.strip():
-                                v = json.loads(ytm.stdout.strip().split('\n')[0])
-                                v_url = v.get('url')
-                                v_title = v.get('title', query)
-                                v_id = v.get('id')
-                                if v_url:
-                                    await process_download(message, v_url, v_title, user_id, v_id)
-                                    asyncio.create_task(delete_later(status_msg, 4))
-                                    try:
-                                        os.remove(clip_file)
-                                    except Exception:
-                                        pass
-                                    return
-
-                    if clip_file:
-                        try:
-                            os.remove(clip_file)
-                        except Exception:
-                            pass
-
-                    # Fall back to matching below
-                    raise RuntimeError("reel_short_fallback")
-
-                # Download exact audio from the IG URL
-                safe_id = ig_id
-                tmp_dir = os.getenv("TMPDIR") or "/tmp"
-                base_name = f"{user_id}_{safe_id}_igfull"
-                output_template = f"{tmp_dir}/{base_name}.%(ext)s"
-                os.makedirs(tmp_dir, exist_ok=True)
-
-                start_msg = await message.reply_text(f"📥 Starting download: {ig_title}\nThis may take a while...")
-                cmd = [
-                    'yt-dlp',
-                    '--no-playlist',
-                    '--retries', '3',
-                    '--fragment-retries', '3',
-                    '--socket-timeout', '15',
-                    '--js-runtimes', 'node',
-                    '-f', 'bestaudio',
-                    '-o', output_template,
-                    url,
-                ]
-                result = await asyncio.to_thread(
-                    subprocess.run,
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=600,
-                )
-
-                matches = glob.glob(f"{tmp_dir}/{base_name}.*") if result.returncode == 0 else []
-                downloaded_file = matches[0] if matches else None
-                if downloaded_file and os.path.exists(downloaded_file):
-                    with open(downloaded_file, 'rb') as f:
-                        await message.reply_audio(audio=f, title=ig_title)
-                    done_msg = await message.reply_text(f"✅ Download complete: {ig_title}\n📁 File: {downloaded_file}")
-                    asyncio.create_task(delete_later(start_msg, 8))
-                    asyncio.create_task(delete_later(done_msg, 8))
-                    asyncio.create_task(delete_later(status_msg, 4))
-                    try:
-                        os.remove(downloaded_file)
-                    except Exception:
-                        pass
-                    return
-
-                # If Instagram download failed, fall back to matching below
             except Exception:
-                pass
+                ig_title = "Instagram"
+                ig_id = None
 
-            meta_cmd = [
-                'yt-dlp',
-                '--dump-single-json',
-                '--no-download',
-                '--no-playlist',
-                url,
-            ]
-            meta_res = await asyncio.to_thread(
-                subprocess.run,
-                meta_cmd,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if meta_res.returncode != 0:
-                await message.reply_text("❌ Could not read Instagram link (may require login/cookies). Try sending a YouTube link instead.")
-                asyncio.create_task(delete_later(status_msg, 4))
-                return
-
-            try:
-                meta = json.loads(meta_res.stdout)
-            except Exception:
-                meta = {}
-
-            # Fallback: try to match by title/description
-            ig_title = (meta.get('title') or "Instagram").strip() or "Instagram"
-            ig_id = (meta.get('id') or "ig").strip() or "ig"
-            
-            # Search YouTube for matching audio
-            query = ig_title
-            ytm = await asyncio.to_thread(
-                subprocess.run,
-                [
-                    'yt-dlp',
-                    '--flat-playlist',
-                    '--dump-json',
-                    '--no-download',
-                    '--no-playlist',
-                    f'ytsearch1:{query} audio'
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if ytm.returncode == 0 and ytm.stdout.strip():
-                v = json.loads(ytm.stdout.strip().split('\n')[0])
-                video_url = v.get('url')
-                title = v.get('title', query)
-                video_id = v.get('id')
-                if video_url:
-                    await process_download(message, video_url, title, user_id, video_id)
-                    asyncio.create_task(delete_later(status_msg, 4))
-                    return
-
-            await message.reply_text("❌ Could not find matching audio for this Instagram video.")
+            await process_download(message, url, ig_title, user_id, ig_id)
             asyncio.create_task(delete_later(status_msg, 4))
             return
 
@@ -880,14 +708,23 @@ async def process_video_download(message, video_url: str, title: str, user_id: i
         cmd = [
             'yt-dlp',
             '--no-playlist',
-            '--retries', '3',
-            '--fragment-retries', '3',
-            '--socket-timeout', '15',
+            '--retries', '10',
+            '--fragment-retries', '10',
+            '--socket-timeout', '30',
+            '--sleep-interval', '2',
+            '--max-sleep-interval', '5',
             '-f', 'bv*[ext=mp4][vcodec^=avc1][width=1920][height=1080]+ba[ext=m4a]/bv*[ext=mp4][vcodec^=avc1][height=1080]+ba[ext=m4a]/bv*[ext=mp4][vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4][width=1920][height=1080]/b[ext=mp4][height<=1080]/best[ext=mp4]/best',
             '--merge-output-format', 'mp4',
             '-o', output_template,
             video_url
         ]
+
+        if is_youtube_url(video_url):
+            cmd = cmd[:-1] + [
+                '--extractor-args', 'youtube:player_client=android',
+                '--user-agent', 'com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip',
+                cmd[-1],
+            ]
 
         if is_instagram_url(video_url):
             cmd = cmd[:-1] + [
@@ -942,7 +779,7 @@ async def process_video_download(message, video_url: str, title: str, user_id: i
                         if width and height:
                             kwargs["width"] = width
                             kwargs["height"] = height
-                        await message.reply_video(video=f, caption=f"🎬 {title}", **kwargs)
+                        await message.reply_video(video=f, caption=f"🎬 {title}\n\n{t(user_id, 'share_footer')}", **kwargs)
                 except Exception as e:
                     logger.error(f"Error sending video: {e}")
                 done_msg = await message.reply_text(t(user_id, "video_download_complete", title=title))
@@ -1003,13 +840,22 @@ async def process_download(message, video_url: str, title: str, user_id: int, vi
         cmd = [
             'yt-dlp',
             '--no-playlist',
-            '--retries', '3',
-            '--fragment-retries', '3',
-            '--socket-timeout', '15',
-            '-f', 'bestaudio',
+            '--retries', '10',
+            '--fragment-retries', '10',
+            '--socket-timeout', '30',
+            '--sleep-interval', '2',
+            '--max-sleep-interval', '5',
+            '-f', 'bestaudio/best',
             '-o', output_template,
             video_url
         ]
+
+        if is_youtube_url(video_url):
+            cmd = cmd[:-1] + [
+                '--extractor-args', 'youtube:player_client=android',
+                '--user-agent', 'com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip',
+                cmd[-1],
+            ]
 
         if is_instagram_url(video_url):
             cmd = cmd[:-1] + [
@@ -1032,7 +878,7 @@ async def process_download(message, video_url: str, title: str, user_id: int, vi
             if downloaded_file and os.path.exists(downloaded_file):
                 try:
                     with open(downloaded_file, 'rb') as f:
-                        await message.reply_audio(audio=f, title=title)
+                        await message.reply_audio(audio=f, title=title, caption=f"{title}\n\n{t(user_id, 'share_footer')}")
                 except Exception as e:
                     logger.error(f"Error sending audio: {e}")
                 done_msg = await message.reply_text(f"✅ Download complete: {title}\n📁 File: {downloaded_file}")
