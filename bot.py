@@ -35,6 +35,13 @@ def _ytdlp_auth_args() -> list[str]:
     args: list[str] = []
 
     if cookies_path:
+        try:
+            if os.path.exists(cookies_path):
+                logger.info(f"yt-dlp cookies: using YTDLP_COOKIES_PATH (bytes={os.path.getsize(cookies_path)})")
+            else:
+                logger.warning("yt-dlp cookies: YTDLP_COOKIES_PATH set but file does not exist")
+        except Exception:
+            logger.info("yt-dlp cookies: using YTDLP_COOKIES_PATH")
         args += ['--cookies', cookies_path]
     elif cookies_b64:
         try:
@@ -42,11 +49,17 @@ def _ytdlp_auth_args() -> list[str]:
             tmp_dir = os.getenv("TMPDIR") or tempfile.gettempdir()
             p = Path(tmp_dir) / "ytdlp_cookies.txt"
             p.write_bytes(raw)
+            try:
+                logger.info(f"yt-dlp cookies: using YTDLP_COOKIES_B64 (bytes={p.stat().st_size})")
+            except Exception:
+                logger.info("yt-dlp cookies: using YTDLP_COOKIES_B64")
             args += ['--cookies', str(p)]
         except Exception:
+            logger.warning("yt-dlp cookies: failed to decode YTDLP_COOKIES_B64")
             pass
 
     if proxy:
+        logger.info("yt-dlp proxy: enabled")
         args += ['--proxy', proxy]
 
     return args
