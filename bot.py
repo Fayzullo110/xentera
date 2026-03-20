@@ -11,6 +11,8 @@ import base64
 import hashlib
 import hmac
 import glob
+import tempfile
+from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from config import Config
@@ -21,6 +23,31 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+def _ytdlp_auth_args() -> list[str]:
+    cookies_path = (os.getenv("YTDLP_COOKIES_PATH") or "").strip()
+    cookies_b64 = (os.getenv("YTDLP_COOKIES_B64") or "").strip()
+    proxy = (os.getenv("YTDLP_PROXY") or "").strip()
+
+    args: list[str] = []
+
+    if cookies_path:
+        args += ['--cookies', cookies_path]
+    elif cookies_b64:
+        try:
+            raw = base64.b64decode(cookies_b64.encode("utf-8"))
+            tmp_dir = os.getenv("TMPDIR") or tempfile.gettempdir()
+            p = Path(tmp_dir) / "ytdlp_cookies.txt"
+            p.write_bytes(raw)
+            args += ['--cookies', str(p)]
+        except Exception:
+            pass
+
+    if proxy:
+        args += ['--proxy', proxy]
+
+    return args
 
 # Helper functions for URL detection and parsing
 import re
@@ -719,6 +746,8 @@ async def process_video_download(message, video_url: str, title: str, user_id: i
             video_url
         ]
 
+        cmd = cmd[:-1] + _ytdlp_auth_args() + [cmd[-1]]
+
         if is_youtube_url(video_url):
             cmd = cmd[:-1] + [
                 '--extractor-args', 'youtube:player_client=android',
@@ -849,6 +878,8 @@ async def process_download(message, video_url: str, title: str, user_id: int, vi
             '-o', output_template,
             video_url
         ]
+
+        cmd = cmd[:-1] + _ytdlp_auth_args() + [cmd[-1]]
 
         if is_youtube_url(video_url):
             cmd = cmd[:-1] + [
