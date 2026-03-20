@@ -13,6 +13,8 @@ import hmac
 import glob
 import tempfile
 from pathlib import Path
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from config import Config
@@ -48,6 +50,38 @@ def _ytdlp_auth_args() -> list[str]:
         args += ['--proxy', proxy]
 
     return args
+
+
+def _start_port_http_server() -> None:
+    port_raw = (os.getenv("PORT") or "").strip()
+    if not port_raw:
+        return
+    try:
+        port = int(port_raw)
+    except Exception:
+        return
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"ok")
+            except Exception:
+                pass
+
+        def log_message(self, format, *args):
+            return
+
+    def _serve():
+        try:
+            httpd = HTTPServer(("0.0.0.0", port), _Handler)
+            httpd.serve_forever()
+        except Exception:
+            return
+
+    threading.Thread(target=_serve, daemon=True).start()
 
 # Helper functions for URL detection and parsing
 import re
@@ -1193,6 +1227,8 @@ def main() -> None:
     """Start the bot."""
     # Validate configuration
     Config.validate()
+
+    _start_port_http_server()
     
     # Create the Application
     # Replit can be slow to upload larger audio files; increase request timeouts.
