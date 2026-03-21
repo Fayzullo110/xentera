@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from contextlib import asynccontextmanager
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from config import Config
@@ -25,6 +26,251 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+_GLOBAL_DOWNLOAD_CONCURRENCY = int(os.getenv("GLOBAL_DOWNLOAD_CONCURRENCY") or "2")
+_download_semaphore = asyncio.Semaphore(_GLOBAL_DOWNLOAD_CONCURRENCY)
+_user_download_locks: dict[int, asyncio.Lock] = {}
+
+_START_TS = time.time()
+
+USERS_FILE = "users.json"
+BANNED_USERS_FILE = "banned_users.json"
+STATS_FILE = "stats.json"
+
+_ADMIN_IDS: set[int] = set()
+try:
+    _ADMIN_IDS = {
+        int(x)
+        for x in (os.getenv("ADMIN_IDS") or "").replace(";", ",").split(",")
+        if x.strip().isdigit()
+    }
+except Exception:
+    _ADMIN_IDS = set()
+
+
+def _is_admin(user_id: int) -> bool:
+    return user_id in _ADMIN_IDS
+
+
+def _load_json_file(path: str, default):
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _save_json_file(path: str, data) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _register_user(user_id: int) -> None:
+    data = _load_json_file(USERS_FILE, {})
+    if not isinstance(data, dict):
+        data = {}
+    if str(user_id) not in data:
+        data[str(user_id)] = {"first_seen": int(time.time())}
+        _save_json_file(USERS_FILE, data)
+
+
+def _load_banned_users() -> set[int]:
+    data = _load_json_file(BANNED_USERS_FILE, [])
+    if isinstance(data, list):
+        out: set[int] = set()
+        for x in data:
+            try:
+                out.add(int(x))
+            except Exception:
+                pass
+        return out
+    return set()
+
+
+def _save_banned_users(banned: set[int]) -> None:
+    _save_json_file(BANNED_USERS_FILE, sorted(list(banned)))
+
+
+def _is_banned(user_id: int) -> bool:
+    return user_id in _load_banned_users()
+
+
+def _stats_inc(key: str, n: int = 1) -> None:
+    data = _load_json_file(STATS_FILE, {})
+    if not isinstance(data, dict):
+        data = {}
+    try:
+        data[key] = int(data.get(key) or 0) + int(n)
+    except Exception:
+        data[key] = n
+    _save_json_file(STATS_FILE, data)
+
+
+def _stats_get() -> dict:
+    data = _load_json_file(STATS_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+
+def _format_uptime(seconds: int) -> str:
+    if seconds < 0:
+        seconds = 0
+    d, rem = divmod(seconds, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    if d:
+        return f"{d}d {h}h {m}m {s}s"
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+async def _admin_only(update: Update) -> bool:
+    uid = update.effective_user.id if update.effective_user else 0
+    if not _is_admin(uid):
+        if update.message:
+            await update.message.reply_text("❌ Admin only")
+        return False
+    return True
+
+
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _register_user(update.effective_user.id)
+    if _is_banned(update.effective_user.id):
+        return
+    uptime = _format_uptime(int(time.time() - _START_TS))
+    await update.message.reply_text(f"ok\nuptime={uptime}")
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _admin_only(update):
+        return
+    users = _load_json_file(USERS_FILE, {})
+    users_count = len(users) if isinstance(users, dict) else 0
+    banned = _load_banned_users()
+    stats = _stats_get()
+    uptime = _format_uptime(int(time.time() - _START_TS))
+
+    audio_ok = int(stats.get("audio_ok") or 0)
+    video_ok = int(stats.get("video_ok") or 0)
+    await update.message.reply_text(
+        "📊 Stats\n"
+        f"uptime: {uptime}\n"
+        f"users: {users_count}\n"
+        f"banned: {len(banned)}\n"
+        f"audio_ok: {audio_ok}\n"
+        f"video_ok: {video_ok}"
+    )
+
+
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _admin_only(update):
+        return
+    if not context.args or not str(context.args[0]).lstrip("-").isdigit():
+        await update.message.reply_text("Usage: /ban <user_id>")
+        return
+    uid = int(context.args[0])
+    banned = _load_banned_users()
+    banned.add(uid)
+    _save_banned_users(banned)
+    await update.message.reply_text(f"✅ Banned {uid}")
+
+
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _admin_only(update):
+        return
+    if not context.args or not str(context.args[0]).lstrip("-").isdigit():
+        await update.message.reply_text("Usage: /unban <user_id>")
+        return
+    uid = int(context.args[0])
+    banned = _load_banned_users()
+    if uid in banned:
+        banned.remove(uid)
+        _save_banned_users(banned)
+    await update.message.reply_text(f"✅ Unbanned {uid}")
+
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _admin_only(update):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /broadcast <message>")
+        return
+    text = " ".join(context.args).strip()
+    if not text:
+        await update.message.reply_text("Usage: /broadcast <message>")
+        return
+
+    users = _load_json_file(USERS_FILE, {})
+    if not isinstance(users, dict) or not users:
+        await update.message.reply_text("No users to broadcast.")
+        return
+
+    banned = _load_banned_users()
+    sent = 0
+    failed = 0
+    for uid_str in list(users.keys()):
+        try:
+            uid = int(uid_str)
+        except Exception:
+            continue
+        if uid in banned:
+            continue
+        try:
+            await context.bot.send_message(chat_id=uid, text=text)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+
+    await update.message.reply_text(f"✅ Broadcast done. sent={sent} failed={failed}")
+
+
+def _get_user_download_lock(user_id: int) -> asyncio.Lock:
+    lock = _user_download_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _user_download_locks[user_id] = lock
+    return lock
+
+
+@asynccontextmanager
+async def _download_limits(message, user_id: int):
+    lock = _get_user_download_lock(user_id)
+    queued_msg = None
+    acquired_lock = False
+    acquired_sem = False
+    try:
+        if lock.locked() or getattr(_download_semaphore, "_value", 0) <= 0:
+            queued_msg = await message.reply_text(t(user_id, "queued"))
+        await lock.acquire()
+        acquired_lock = True
+        await _download_semaphore.acquire()
+        acquired_sem = True
+        yield
+    finally:
+        if acquired_sem:
+            try:
+                _download_semaphore.release()
+            except Exception:
+                pass
+        if acquired_lock:
+            try:
+                lock.release()
+            except Exception:
+                pass
+        if queued_msg is not None:
+            try:
+                asyncio.create_task(delete_later(queued_msg, 4))
+            except Exception:
+                pass
 
 
 def _ytdlp_auth_args() -> list[str]:
@@ -176,6 +422,7 @@ TRANSLATIONS = {
         "video_button": "🎬 Video",
         "music_button": "🎵 Music",
         "share_footer": "⬇️ Download music and video with @xcrumbbot",
+        "queued": "⏳ Added to queue. Please wait...",
         "timeout": "⏰ Search timed out. Please try again.",
     },
     "uz": {
@@ -196,6 +443,7 @@ TRANSLATIONS = {
         "video_button": "🎬 Video",
         "music_button": "🎵 Music",
         "share_footer": "⬇️ Musiqa va videoni @xcrumbbot orqali yuklab oling",
+        "queued": "⏳ Navbatga qo‘shildi. Iltimos kuting...",
         "timeout": "⏰ Qidirish vaqti tugadi. Iltimos, qayta urinib ko'ring.",
     },
     "ru": {
@@ -216,6 +464,7 @@ TRANSLATIONS = {
         "video_button": "🎬 Видео",
         "music_button": "🎵 Музыка",
         "share_footer": "⬇️ Скачивай музыку и видео через @xcrumbbot",
+        "queued": "⏳ Добавлено в очередь. Пожалуйста, подождите...",
         "timeout": "⏰ Поиск завершился по времени. Попробуйте еще раз.",
     },
 }
@@ -365,6 +614,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Send a message when the command /start is issued."""
     user = update.effective_user
 
+    _register_user(user.id)
+    if _is_banned(user.id):
+        return
+
     langs = _load_user_langs()
     if str(user.id) not in langs:
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -386,12 +639,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
+    _register_user(update.effective_user.id)
+    if _is_banned(update.effective_user.id):
+        return
     await update.message.reply_text(
         t(update.effective_user.id, "help", bot=Config.BOT_NAME)
     )
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /about is issued."""
+    _register_user(update.effective_user.id)
+    if _is_banned(update.effective_user.id):
+        return
     await update.message.reply_text(
         t(update.effective_user.id, "about", bot=Config.BOT_NAME)
     )
@@ -769,128 +1028,130 @@ async def process_video_download(message, video_url: str, title: str, user_id: i
     start_msg = await message.reply_text(t(user_id, "video_download_start", title=title))
     
     try:
-        import subprocess
-        import os
-        import glob
-        
-        # Download best video quality (no audio conversion needed)
-        tmp_dir = os.getenv("TMPDIR") or "/tmp"
-        safe_id = video_id or "unknown"
-        base_name = f"{user_id}_{safe_id}_video"
-        output_template = f"{tmp_dir}/{base_name}.%(ext)s"
-        
-        cmd = [
-            'yt-dlp',
-            '--no-playlist',
-            '--retries', '10',
-            '--fragment-retries', '10',
-            '--socket-timeout', '30',
-            '--sleep-interval', '2',
-            '--max-sleep-interval', '5',
-            '-f', 'bv*[ext=mp4][vcodec^=avc1][width=1920][height=1080]+ba[ext=m4a]/bv*[ext=mp4][vcodec^=avc1][height=1080]+ba[ext=m4a]/bv*[ext=mp4][vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4][width=1920][height=1080]/b[ext=mp4][height<=1080]/best[ext=mp4]/best',
-            '--merge-output-format', 'mp4',
-            '-o', output_template,
-            video_url
-        ]
-
-        cmd = cmd[:-1] + _ytdlp_auth_args() + [cmd[-1]]
-
-        if is_youtube_url(video_url):
-            cmd = cmd[:-1] + [
-                '--extractor-args', 'youtube:player_client=android',
-                '--user-agent', 'com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip',
-                cmd[-1],
+        async with _download_limits(message, user_id):
+            import subprocess
+            import os
+            import glob
+            
+            # Download best video quality (no audio conversion needed)
+            tmp_dir = os.getenv("TMPDIR") or "/tmp"
+            safe_id = video_id or "unknown"
+            base_name = f"{user_id}_{safe_id}_video"
+            output_template = f"{tmp_dir}/{base_name}.%(ext)s"
+            
+            cmd = [
+                'yt-dlp',
+                '--no-playlist',
+                '--retries', '10',
+                '--fragment-retries', '10',
+                '--socket-timeout', '30',
+                '--sleep-interval', '2',
+                '--max-sleep-interval', '5',
+                '-f', 'bv*[ext=mp4][vcodec^=avc1][width=1920][height=1080]+ba[ext=m4a]/bv*[ext=mp4][vcodec^=avc1][height=1080]+ba[ext=m4a]/bv*[ext=mp4][vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4][width=1920][height=1080]/b[ext=mp4][height<=1080]/best[ext=mp4]/best',
+                '--merge-output-format', 'mp4',
+                '-o', output_template,
+                video_url
             ]
 
-        if is_instagram_url(video_url):
-            cmd = cmd[:-1] + [
-                '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                '--add-header', 'Referer:https://www.instagram.com/',
-                cmd[-1],
-            ]
-        
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        
-        if result.returncode == 0:
-            matches = glob.glob(f"{tmp_dir}/{base_name}.*")
-            downloaded_file = matches[0] if matches else None
-            if downloaded_file and os.path.exists(downloaded_file):
-                try:
-                    width = None
-                    height = None
+            cmd = cmd[:-1] + _ytdlp_auth_args() + [cmd[-1]]
+
+            if is_youtube_url(video_url):
+                cmd = cmd[:-1] + [
+                    '--extractor-args', 'youtube:player_client=android',
+                    '--user-agent', 'com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip',
+                    cmd[-1],
+                ]
+
+            if is_instagram_url(video_url):
+                cmd = cmd[:-1] + [
+                    '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    '--add-header', 'Referer:https://www.instagram.com/',
+                    cmd[-1],
+                ]
+            
+            result = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            
+            if result.returncode == 0:
+                matches = glob.glob(f"{tmp_dir}/{base_name}.*")
+                downloaded_file = matches[0] if matches else None
+                if downloaded_file and os.path.exists(downloaded_file):
                     try:
-                        probe = await asyncio.to_thread(
-                            subprocess.run,
-                            [
-                                'ffprobe',
-                                '-v', 'error',
-                                '-select_streams', 'v:0',
-                                '-show_entries', 'stream=width,height',
-                                '-of', 'csv=s=x:p=0',
-                                downloaded_file,
-                            ],
-                            capture_output=True,
-                            text=True,
-                            timeout=15,
-                        )
-                        if probe.returncode == 0 and probe.stdout:
-                            dims = probe.stdout.strip().splitlines()[0].strip()
-                            if 'x' in dims:
-                                w_str, h_str = dims.split('x', 1)
-                                width = int(w_str)
-                                height = int(h_str)
-                    except Exception:
                         width = None
                         height = None
+                        try:
+                            probe = await asyncio.to_thread(
+                                subprocess.run,
+                                [
+                                    'ffprobe',
+                                    '-v', 'error',
+                                    '-select_streams', 'v:0',
+                                    '-show_entries', 'stream=width,height',
+                                    '-of', 'csv=s=x:p=0',
+                                    downloaded_file,
+                                ],
+                                capture_output=True,
+                                text=True,
+                                timeout=15,
+                            )
+                            if probe.returncode == 0 and probe.stdout:
+                                dims = probe.stdout.strip().splitlines()[0].strip()
+                                if 'x' in dims:
+                                    w_str, h_str = dims.split('x', 1)
+                                    width = int(w_str)
+                                    height = int(h_str)
+                        except Exception:
+                            width = None
+                            height = None
 
-                    # Send as video file
-                    with open(downloaded_file, 'rb') as f:
-                        kwargs = {"supports_streaming": True}
-                        if width and height:
-                            kwargs["width"] = width
-                            kwargs["height"] = height
-                        await message.reply_video(video=f, caption=f"🎬 {title}\n\n{t(user_id, 'share_footer')}", **kwargs)
-                except Exception as e:
-                    logger.error(f"Error sending video: {e}")
-                done_msg = await message.reply_text(t(user_id, "video_download_complete", title=title))
+                        # Send as video file
+                        with open(downloaded_file, 'rb') as f:
+                            kwargs = {"supports_streaming": True}
+                            if width and height:
+                                kwargs["width"] = width
+                                kwargs["height"] = height
+                            await message.reply_video(video=f, caption=f"🎬 {title}\n\n{t(user_id, 'share_footer')}", **kwargs)
+                            _stats_inc("video_ok", 1)
+                    except Exception as e:
+                        logger.error(f"Error sending video: {e}")
+                    done_msg = await message.reply_text(t(user_id, "video_download_complete", title=title))
 
-                try:
-                    os.remove(downloaded_file)
-                except Exception:
-                    pass
-
-                async def _delete_later(msg, delay: int):
                     try:
-                        await asyncio.sleep(delay)
-                        await msg.delete()
+                        os.remove(downloaded_file)
                     except Exception:
                         pass
 
-                asyncio.create_task(_delete_later(start_msg, 8))
-                asyncio.create_task(_delete_later(done_msg, 8))
+                    async def _delete_later(msg, delay: int):
+                        try:
+                            await asyncio.sleep(delay)
+                            await msg.delete()
+                        except Exception:
+                            pass
+
+                    asyncio.create_task(_delete_later(start_msg, 8))
+                    asyncio.create_task(_delete_later(done_msg, 8))
+                else:
+                    await message.reply_text(t(user_id, "video_download_failed"))
             else:
-                await message.reply_text(t(user_id, "video_download_failed"))
-        else:
-            stderr = (result.stderr or "").lower()
-            if is_instagram_url(video_url) and (
-                "login" in stderr
-                or "cookies" in stderr
-                or "session" in stderr
-                or "private" in stderr
-                or "challenge" in stderr
-            ):
-                await message.reply_text(
-                    "❌ Instagram requires login/cookies for this link. Without logging in, only some public posts can be downloaded.\n"
-                    "Try a different Instagram link (public), or send a YouTube link instead."
-                )
-            else:
-                await message.reply_text(t(user_id, "video_download_failed"))
+                stderr = (result.stderr or "").lower()
+                if is_instagram_url(video_url) and (
+                    "login" in stderr
+                    or "cookies" in stderr
+                    or "session" in stderr
+                    or "private" in stderr
+                    or "challenge" in stderr
+                ):
+                    await message.reply_text(
+                        "❌ Instagram requires login/cookies for this link. Without logging in, only some public posts can be downloaded.\n"
+                        "Try a different Instagram link (public), or send a YouTube link instead."
+                    )
+                else:
+                    await message.reply_text(t(user_id, "video_download_failed"))
             
     except subprocess.TimeoutExpired:
         await message.reply_text(t(user_id, "timeout"))
@@ -903,96 +1164,98 @@ async def process_download(message, video_url: str, title: str, user_id: int, vi
     start_msg = await message.reply_text(f"📥 Starting download: {title}\nThis may take a while...")
     
     try:
-        import subprocess
-        import os
-        import glob
-        
-        # Replit-friendly: download bestaudio without converting to mp3 (ffmpeg often isn't available).
-        tmp_dir = os.getenv("TMPDIR") or "/tmp"
-        safe_id = video_id or "unknown"
-        base_name = f"{user_id}_{safe_id}"
-        output_template = f"{tmp_dir}/{base_name}.%(ext)s"
-        
-        cmd = [
-            'yt-dlp',
-            '--no-playlist',
-            '--retries', '10',
-            '--fragment-retries', '10',
-            '--socket-timeout', '30',
-            '--sleep-interval', '2',
-            '--max-sleep-interval', '5',
-            '-f', 'bestaudio/best',
-            '-o', output_template,
-            video_url
-        ]
-
-        cmd = cmd[:-1] + _ytdlp_auth_args() + [cmd[-1]]
-
-        if is_youtube_url(video_url):
-            cmd = cmd[:-1] + [
-                '--extractor-args', 'youtube:player_client=android',
-                '--user-agent', 'com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip',
-                cmd[-1],
+        async with _download_limits(message, user_id):
+            import subprocess
+            import os
+            import glob
+            
+            # Replit-friendly: download bestaudio without converting to mp3 (ffmpeg often isn't available).
+            tmp_dir = os.getenv("TMPDIR") or "/tmp"
+            safe_id = video_id or "unknown"
+            base_name = f"{user_id}_{safe_id}"
+            output_template = f"{tmp_dir}/{base_name}.%(ext)s"
+            
+            cmd = [
+                'yt-dlp',
+                '--no-playlist',
+                '--retries', '10',
+                '--fragment-retries', '10',
+                '--socket-timeout', '30',
+                '--sleep-interval', '2',
+                '--max-sleep-interval', '5',
+                '-f', 'bestaudio/best',
+                '-o', output_template,
+                video_url
             ]
 
-        if is_instagram_url(video_url):
-            cmd = cmd[:-1] + [
-                '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                '--add-header', 'Referer:https://www.instagram.com/',
-                cmd[-1],
-            ]
-        
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        
-        if result.returncode == 0:
-            matches = glob.glob(f"{tmp_dir}/{base_name}.*")
-            downloaded_file = matches[0] if matches else None
-            if downloaded_file and os.path.exists(downloaded_file):
-                try:
-                    with open(downloaded_file, 'rb') as f:
-                        await message.reply_audio(audio=f, title=title, caption=f"{title}\n\n{t(user_id, 'share_footer')}")
-                except Exception as e:
-                    logger.error(f"Error sending audio: {e}")
-                done_msg = await message.reply_text(f"✅ Download complete: {title}\n📁 File: {downloaded_file}")
+            cmd = cmd[:-1] + _ytdlp_auth_args() + [cmd[-1]]
 
-                try:
-                    os.remove(downloaded_file)
-                except Exception:
-                    pass
+            if is_youtube_url(video_url):
+                cmd = cmd[:-1] + [
+                    '--extractor-args', 'youtube:player_client=android',
+                    '--user-agent', 'com.google.android.youtube/17.31.35 (Linux; U; Android 11) gzip',
+                    cmd[-1],
+                ]
 
-                async def _delete_later(msg, delay: int):
+            if is_instagram_url(video_url):
+                cmd = cmd[:-1] + [
+                    '--user-agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                    '--add-header', 'Referer:https://www.instagram.com/',
+                    cmd[-1],
+                ]
+            
+            result = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            
+            if result.returncode == 0:
+                matches = glob.glob(f"{tmp_dir}/{base_name}.*")
+                downloaded_file = matches[0] if matches else None
+                if downloaded_file and os.path.exists(downloaded_file):
                     try:
-                        await asyncio.sleep(delay)
-                        await msg.delete()
+                        with open(downloaded_file, 'rb') as f:
+                            await message.reply_audio(audio=f, title=title, caption=f"{title}\n\n{t(user_id, 'share_footer')}")
+                        _stats_inc("audio_ok", 1)
+                    except Exception as e:
+                        logger.error(f"Error sending audio: {e}")
+                    done_msg = await message.reply_text(f"✅ Download complete: {title}\n📁 File: {downloaded_file}")
+
+                    try:
+                        os.remove(downloaded_file)
                     except Exception:
                         pass
 
-                asyncio.create_task(_delete_later(start_msg, 8))
-                asyncio.create_task(_delete_later(done_msg, 8))
+                    async def _delete_later(msg, delay: int):
+                        try:
+                            await asyncio.sleep(delay)
+                            await msg.delete()
+                        except Exception:
+                            pass
+
+                    asyncio.create_task(_delete_later(start_msg, 8))
+                    asyncio.create_task(_delete_later(done_msg, 8))
+                else:
+                    await message.reply_text("✅ Download complete but file not found")
             else:
-                await message.reply_text("✅ Download complete but file not found")
-        else:
-            stderr = (result.stderr or "")
-            low = stderr.lower()
-            if is_instagram_url(video_url) and (
-                "login" in low
-                or "cookies" in low
-                or "session" in low
-                or "private" in low
-                or "challenge" in low
-            ):
-                await message.reply_text(
-                    "❌ Instagram requires login/cookies for this link. Without logging in, only some public posts can be downloaded.\n"
-                    "Try a different Instagram link (public), or send a YouTube link instead."
-                )
-            else:
-                await message.reply_text(f"❌ Download failed: {stderr}")
+                stderr = (result.stderr or "")
+                low = stderr.lower()
+                if is_instagram_url(video_url) and (
+                    "login" in low
+                    or "cookies" in low
+                    or "session" in low
+                    or "private" in low
+                    or "challenge" in low
+                ):
+                    await message.reply_text(
+                        "❌ Instagram requires login/cookies for this link. Without logging in, only some public posts can be downloaded.\n"
+                        "Try a different Instagram link (public), or send a YouTube link instead."
+                    )
+                else:
+                    await message.reply_text(f"❌ Download failed: {stderr}")
             
     except subprocess.TimeoutExpired:
         await message.reply_text("⏰ Download timed out. Please try again.")
@@ -1130,6 +1393,10 @@ async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+
+    _register_user(user_id)
+    if _is_banned(user_id):
+        return
     data = query.data
 
     # Handle language selection
@@ -1208,6 +1475,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text.strip()
     user_id = update.message.from_user.id
 
+    _register_user(user_id)
+    if _is_banned(user_id):
+        return
+
     urls = extract_urls(text)
     if urls:
         url = urls[0]
@@ -1262,6 +1533,12 @@ def main() -> None:
     application.add_handler(CommandHandler("photo", photo_command))
     application.add_handler(CommandHandler("music", handle_music_search))
     application.add_handler(CommandHandler("video", handle_video_search))
+
+    application.add_handler(CommandHandler("health", health_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("ban", ban_command))
+    application.add_handler(CommandHandler("unban", unban_command))
 
     # Add callback query handler for inline buttons
     from telegram.ext import CallbackQueryHandler
